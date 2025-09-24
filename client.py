@@ -1,12 +1,15 @@
 import asyncio
 from typing import Optional
 from contextlib import AsyncExitStack
+import os
+import sys
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from auth import AuthManager
 
 load_dotenv()  # load environment variables from .env
 model = "claude-sonnet-4-20250514"
@@ -16,6 +19,7 @@ class MCPClient:
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
         self.anthropic = Anthropic()
+        self.auth: Optional[AuthManager] = None
 
     async def connect_to_server(self, server_script_path: str):
         """Connect to an MCP server
@@ -29,10 +33,16 @@ class MCPClient:
             raise ValueError("Server script must be a .py or .js file")
             
         command = "python" if is_python else "node"
+        # Compute server directory for starting the auth helper
+        server_dir = os.path.dirname(os.path.abspath(server_script_path))
+        # Initialize auth manager
+        self.auth = AuthManager(server_dir)
+
+        # Ensure the server inherits our environment (so OUTLOOK_CLIENT_* from our .env is available)
         server_params = StdioServerParameters(
             command=command,
             args=[server_script_path],
-            env=None
+            env=os.environ.copy()
         )
         
         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
@@ -45,6 +55,10 @@ class MCPClient:
         response = await self.session.list_tools()
         tools = response.tools
         print("\nConnected to server with tools:", [tool.name for tool in tools])
+
+        # Ensure we are authenticated before proceeding
+        if self.auth:
+            await self.auth.ensure_authenticated(self.session)
 
     async def process_query(self, query: str) -> str:
         """Process a query using Claude and available tools"""
@@ -129,6 +143,9 @@ class MCPClient:
     async def cleanup(self):
         """Clean up resources"""
         await self.exit_stack.aclose()
+        # Stop auth helper if started
+        if self.auth:
+            self.auth.stop()
 
 async def main():
     if len(sys.argv) < 2:
@@ -143,6 +160,5 @@ async def main():
         await client.cleanup()
 
 if __name__ == "__main__":
-    import sys
     asyncio.run(main())
 
